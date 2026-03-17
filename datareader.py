@@ -8,8 +8,13 @@
 
 
 from Utils import *
-import json,os,sys
+import json, os, sys
 
+try:
+    from ruamel.yaml import YAML
+    _yaml_loader = YAML(typ='safe', pure=True)
+except Exception:
+    _yaml_loader = None
 
 BOP_LIST = ['lmo','tless','ycbv','hb','tudl','icbin','itodd']
 BOP_DIR = os.getenv('BOP_DIR')
@@ -150,6 +155,145 @@ class YcbineoatReader:
     YCB_VIDEO_DIR = os.getenv('YCB_VIDEO_DIR')
     mesh = trimesh.load(f'{YCB_VIDEO_DIR}/models/{ob_name}/textured_simple.obj')
     return mesh
+
+
+class CalibrationMountReader:
+  """
+  Reader for calibration-mount layout (mustard0-aligned or legacy):
+    Mustard0-aligned: rgb/, depth/, masks/, cam_K.txt, groundtruth/<folder>/*.obj
+  """
+  def __init__(self, video_dir, downscale=1, shorter_side=None, zfar=np.inf):
+    self.video_dir = video_dir.rstrip('/')
+    self.downscale = downscale
+    self.zfar = zfar
+    # Mustard0-aligned: rgb/ first; fallback to legacy images/color/
+    self.color_files = sorted(glob.glob(f"{self.video_dir}/rgb/*.png"))
+    if len(self.color_files) == 0:
+      self.color_files = sorted(glob.glob(f"{self.video_dir}/rgb/*.jpg"))
+    if len(self.color_files) == 0:
+      self.color_files = sorted(glob.glob(f"{self.video_dir}/images/color/*.png"))
+    if len(self.color_files) == 0:
+      self.color_files = sorted(glob.glob(f"{self.video_dir}/images/color/*.jpg"))
+    if len(self.color_files) == 0:
+      raise RuntimeError(f"No color images in {self.video_dir}/rgb/ or {self.video_dir}/images/color/")
+    self._use_rgb_layout = (os.path.dirname(self.color_files[0]) == os.path.join(self.video_dir, 'rgb'))
+
+    # Camera intrinsics: prefer intrinsics_color.yaml, else cam_K.txt
+    cam_txt = f'{self.video_dir}/cam_K.txt'
+    yaml_path = f'{self.video_dir}/intrinsics_color.yaml'
+    if os.path.isfile(yaml_path) and _yaml_loader is not None:
+      with open(yaml_path, 'r') as f:
+        cam_info = _yaml_loader.load(f)
+      if cam_info and 'intrinsic_matrix' in cam_info:
+        d = list(cam_info['intrinsic_matrix']['data'])
+        self.K = np.array([d[0:3], d[3:6], d[6:9]], dtype=np.float64)
+      elif cam_info:
+        cam = cam_info.get('camera_matrix') or {}
+        fx = float(cam.get('fx', 0) or cam_info.get('fx', 0))
+        fy = float(cam.get('fy', 0) or cam_info.get('fy', 0))
+        cx = float(cam.get('cx', 0) or cam_info.get('cx', 0))
+        cy = float(cam.get('cy', 0) or cam_info.get('cy', 0))
+        self.K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+    elif os.path.isfile(cam_txt):
+      self.K = np.loadtxt(cam_txt).reshape(3, 3)
+    else:
+      raise RuntimeError(f"No camera intrinsics: {yaml_path} or {cam_txt}")
+
+    self.id_strs = [os.path.basename(p).replace('.png', '').replace('.jpg', '') for p in self.color_files]
+    self.H, self.W = cv2.imread(self.color_files[0]).shape[:2]
+
+    if shorter_side is not None:
+      self.downscale = shorter_side / min(self.H, self.W)
+    self.H = int(self.H * self.downscale)
+    self.W = int(self.W * self.downscale)
+    self.K[:2] *= self.downscale
+
+    self._gt_pose_file = f'{self.video_dir}/groundtruth/groundtruth_pose.txt'
+    self._pose_dir = f'{self.video_dir}/poses'
+
+  def get_video_name(self):
+    return os.path.basename(self.video_dir)
+
+  def __len__(self):
+    return len(self.color_files)
+
+  def get_gt_pose(self, i):
+    if os.path.isfile(self._gt_pose_file):
+      return np.loadtxt(self._gt_pose_file).reshape(4, 4)
+    return None
+
+  def get_color(self, i):
+    color = imageio.imread(self.color_files[i])[..., :3]
+    color = cv2.resize(color, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
+    return color
+
+  def _depth_path(self, i):
+    base = os.path.basename(self.color_files[i])
+    base = base.replace('color', 'depth', 1)
+    if self._use_rgb_layout:
+      return os.path.join(self.video_dir, 'depth', base)
+    for sub in ('depth_20', 'depth'):
+      path = os.path.join(self.video_dir, 'images', sub, base)
+      if os.path.isfile(path):
+        return path
+    return os.path.join(self.video_dir, 'images', 'depth_20', base)
+
+  def _mask_path(self, i):
+    base = os.path.basename(self.color_files[i])
+    if self._use_rgb_layout:
+      return os.path.join(self.video_dir, 'masks', base)
+    return os.path.join(self.video_dir, 'images', 'mask', base)
+
+  def get_mask(self, i):
+    path = self._mask_path(i)
+    if not os.path.isfile(path):
+      # fallback: mask might use depth naming (e.g. depth0001.png)
+      depth_base = os.path.basename(self._depth_path(i))
+      if self._use_rgb_layout:
+        path = os.path.join(self.video_dir, 'masks', depth_base)
+      else:
+        path = os.path.join(self.video_dir, 'images', 'mask', depth_base)
+    mask = cv2.imread(path, -1)
+    if mask is None:
+      raise FileNotFoundError(f"Mask not found: {path}")
+    if len(mask.shape) == 3:
+      for c in range(3):
+        if mask[..., c].sum() > 0:
+          mask = mask[..., c]
+          break
+    mask = cv2.resize(mask, (self.W, self.H), interpolation=cv2.INTER_NEAREST).astype(bool).astype(np.uint8)
+    return mask
+
+  def get_depth(self, i):
+    path = self._depth_path(i)
+    depth = cv2.imread(path, -1)
+    if depth is None:
+      raise FileNotFoundError(f"Depth not found: {path}")
+    depth = depth.astype(np.float64) / 1000.0  # mm -> meters
+    depth = cv2.resize(depth, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
+    depth[(depth < 0.001) | (depth >= self.zfar)] = 0
+    return depth
+
+  def get_xyz_map(self, i):
+    depth = self.get_depth(i)
+    return depth2xyzmap(depth, self.K)
+
+  def get_gt_mesh_path(self):
+    gt_dir = os.path.join(self.video_dir, 'groundtruth')
+    for name in sorted(os.listdir(gt_dir)):
+      sub = os.path.join(gt_dir, name)
+      if not os.path.isdir(sub):
+        continue
+      for f in sorted(os.listdir(sub)):
+        if f.endswith('.obj'):
+          return os.path.join(sub, f)
+    return None
+
+  def get_gt_mesh(self):
+    path = self.get_gt_mesh_path()
+    if path is None:
+      raise FileNotFoundError(f"No .obj in {self.video_dir}/groundtruth/")
+    return trimesh.load(path)
 
 
 class BopBaseReader:

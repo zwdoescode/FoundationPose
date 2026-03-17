@@ -8,5 +8,5 @@ docker run -it --rm \
    --runtime=nvidia \
    --gpus='"device=0"' \
    --network=host \
-   -v /home/scavallari/Projects/foundation-pose:/workspace/foundation-pose \
-   foundation-pose:latest
+   -v /mnt/nova_ssd/repositories/foundationpose-nvlab:/workspace/foundation-pose \
+   foundationpose:latest

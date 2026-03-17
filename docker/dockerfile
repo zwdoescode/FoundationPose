@@ -1,5 +1,5 @@
 # FROM nvidia/cudagl:11.3.0-devel-ubuntu20.04
-FROM nvcr.io/nvidia/pytorch:25.06-py3
+FROM nvcr.io/nvidia/pytorch:25.06-py3-igpu
 
 ENV TZ=US/Pacific
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
@@ -52,9 +52,12 @@ RUN unset PIP_CONSTRAINT \
 
 # install dependency build tools froum source
 RUN pip install warp-lang setuptools wheel ninja
-# install kaolin from source
+# install kaolin from source (apply PyTorch 2.6+ compat: .type() -> .scalar_type() in CUDA code)
 RUN cd / && git clone --recursive https://github.com/NVIDIAGameWorks/kaolin
-RUN cd /kaolin && FORCE_CUDA=1 python setup.py develop
+RUN sed -i 's/\.type()/.scalar_type()/g' /kaolin/kaolin/csrc/ops/spc/query_cuda.cu /kaolin/kaolin/csrc/ops/spc/point_utils_cuda.cu /kaolin/kaolin/csrc/render/spc/raytrace_cuda.cu 2>/dev/null || true
+# Use pip install -e --no-deps to avoid pulling usd-core (not on PyPI for aarch64); install Kaolin deps manually
+RUN cd /kaolin && FORCE_CUDA=1 pip install --no-deps -e .
+RUN pip install pygltflib flask ipycanvas ipyevents
 # install pytorch3d from source
 RUN pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
 # install nvdiffrast from source
@@ -63,7 +66,9 @@ RUN pip install "git+https://github.com/NVlabs/nvdiffrast.git" --no-build-isolat
 
 ENV OPENCV_IO_ENABLE_OPENEXR=1
 
-RUN pip install pyyaml ruamel.yaml trimesh opencv-python==4.9.0.80 imageio open3d transformations warp-lang einops kornia pyrender
+RUN pip install pyyaml ruamel.yaml trimesh opencv-python==4.9.0.80 imageio transformations warp-lang einops kornia pyrender omegaconf h5py
+# Official open3d has no PyPI wheel on some platforms (e.g. aarch64). Fallback to unofficial ARM wheels.
+RUN pip install open3d || pip install open3d-unofficial-arm
 #RUN pip install scikit-image meshcat webdataset omegaconf pypng roma seaborn opencv-contrib-python openpyxl wandb imgaug Ninja xlsxwriter timm albumentations xatlas rtree nodejs jupyterlab objaverse g4f ultralytics==8.0.120 pycocotools videoio numba h5py
 
 

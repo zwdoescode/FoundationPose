@@ -8,13 +8,8 @@
 
 
 from Utils import *
-import json, os, sys
+import json,os,sys
 
-try:
-    from ruamel.yaml import YAML
-    _yaml_loader = YAML(typ='safe', pure=True)
-except Exception:
-    _yaml_loader = None
 
 BOP_LIST = ['lmo','tless','ycbv','hb','tudl','icbin','itodd']
 BOP_DIR = os.getenv('BOP_DIR')
@@ -157,59 +152,69 @@ class YcbineoatReader:
     return mesh
 
 
+def _load_cam_K_from_yaml(yaml_path):
+  """Load 3x3 K from intrinsics_color.yaml (camera_matrix or intrinsic_matrix)."""
+  try:
+    import yaml
+  except ImportError:
+    return None
+  if not os.path.isfile(yaml_path):
+    return None
+  with open(yaml_path, 'r') as f:
+    data = yaml.safe_load(f)
+  if not data:
+    return None
+  if 'intrinsic_matrix' in data and 'data' in data['intrinsic_matrix']:
+    d = list(data['intrinsic_matrix']['data'])
+    if len(d) >= 9:
+      return np.array([d[0:3], d[3:6], d[6:9]], dtype=np.float64)
+  if 'camera_matrix' in data:
+    cam = data['camera_matrix']
+    fx = float(cam.get('fx', 0) or 0)
+    fy = float(cam.get('fy', 0) or 0)
+    cx = float(cam.get('cx', 0) or 0)
+    cy = float(cam.get('cy', 0) or 0)
+    if fx and fy:
+      return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+  return None
+
+
 class CalibrationMountReader:
   """
-  Reader for calibration-mount layout (mustard0-aligned or legacy):
-    Mustard0-aligned: rgb/, depth/, masks/, cam_K.txt, groundtruth/<folder>/*.obj
+  Reader for calibration-mount layout (mustard0-aligned):
+    rgb/: color images (e.g. color0001.png)
+    depth/: depth images, 16-bit mm; same basename as color or depth0001.png
+    masks/: mask per frame, same basename as color
+    cam_K.txt or intrinsics_color.yaml for 3x3 K
+    groundtruth/<folder>/*.obj for mesh (get_gt_mesh_path)
   """
   def __init__(self, video_dir, downscale=1, shorter_side=None, zfar=np.inf):
-    self.video_dir = video_dir.rstrip('/')
+    self.video_dir = os.path.normpath(video_dir.rstrip('/'))
     self.downscale = downscale
     self.zfar = zfar
-    # Mustard0-aligned: rgb/ first; fallback to legacy images/color/
     self.color_files = sorted(glob.glob(f"{self.video_dir}/rgb/*.png"))
-    if len(self.color_files) == 0:
+    if not self.color_files:
       self.color_files = sorted(glob.glob(f"{self.video_dir}/rgb/*.jpg"))
-    if len(self.color_files) == 0:
-      self.color_files = sorted(glob.glob(f"{self.video_dir}/images/color/*.png"))
-    if len(self.color_files) == 0:
-      self.color_files = sorted(glob.glob(f"{self.video_dir}/images/color/*.jpg"))
-    if len(self.color_files) == 0:
-      raise RuntimeError(f"No color images in {self.video_dir}/rgb/ or {self.video_dir}/images/color/")
-    self._use_rgb_layout = (os.path.dirname(self.color_files[0]) == os.path.join(self.video_dir, 'rgb'))
-
-    # Camera intrinsics: prefer intrinsics_color.yaml, else cam_K.txt
-    cam_txt = f'{self.video_dir}/cam_K.txt'
-    yaml_path = f'{self.video_dir}/intrinsics_color.yaml'
-    if os.path.isfile(yaml_path) and _yaml_loader is not None:
-      with open(yaml_path, 'r') as f:
-        cam_info = _yaml_loader.load(f)
-      if cam_info and 'intrinsic_matrix' in cam_info:
-        d = list(cam_info['intrinsic_matrix']['data'])
-        self.K = np.array([d[0:3], d[3:6], d[6:9]], dtype=np.float64)
-      elif cam_info:
-        cam = cam_info.get('camera_matrix') or {}
-        fx = float(cam.get('fx', 0) or cam_info.get('fx', 0))
-        fy = float(cam.get('fy', 0) or cam_info.get('fy', 0))
-        cx = float(cam.get('cx', 0) or cam_info.get('cx', 0))
-        cy = float(cam.get('cy', 0) or cam_info.get('cy', 0))
-        self.K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
-    elif os.path.isfile(cam_txt):
+    if not self.color_files:
+      raise RuntimeError(f"No color images in {self.video_dir}/rgb/")
+    self._use_rgb_layout = True
+    cam_txt = os.path.join(self.video_dir, 'cam_K.txt')
+    yaml_path = os.path.join(self.video_dir, 'intrinsics_color.yaml')
+    if os.path.isfile(cam_txt):
       self.K = np.loadtxt(cam_txt).reshape(3, 3)
     else:
-      raise RuntimeError(f"No camera intrinsics: {yaml_path} or {cam_txt}")
-
+      K = _load_cam_K_from_yaml(yaml_path)
+      if K is not None:
+        self.K = K
+      else:
+        raise RuntimeError(f"No camera intrinsics: {cam_txt} or {yaml_path}")
     self.id_strs = [os.path.basename(p).replace('.png', '').replace('.jpg', '') for p in self.color_files]
     self.H, self.W = cv2.imread(self.color_files[0]).shape[:2]
-
     if shorter_side is not None:
       self.downscale = shorter_side / min(self.H, self.W)
     self.H = int(self.H * self.downscale)
     self.W = int(self.W * self.downscale)
-    self.K[:2] *= self.downscale
-
-    self._gt_pose_file = f'{self.video_dir}/groundtruth/groundtruth_pose.txt'
-    self._pose_dir = f'{self.video_dir}/poses'
+    self.K[:2, :] *= self.downscale
 
   def get_video_name(self):
     return os.path.basename(self.video_dir)
@@ -217,42 +222,28 @@ class CalibrationMountReader:
   def __len__(self):
     return len(self.color_files)
 
-  def get_gt_pose(self, i):
-    if os.path.isfile(self._gt_pose_file):
-      return np.loadtxt(self._gt_pose_file).reshape(4, 4)
-    return None
-
   def get_color(self, i):
-    color = imageio.imread(self.color_files[i])[..., :3]
-    color = cv2.resize(color, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
-    return color
+    out = imageio.imread(self.color_files[i])[..., :3]
+    return cv2.resize(out, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
 
   def _depth_path(self, i):
     base = os.path.basename(self.color_files[i])
-    base = base.replace('color', 'depth', 1)
-    if self._use_rgb_layout:
-      return os.path.join(self.video_dir, 'depth', base)
-    for sub in ('depth_20', 'depth'):
-      path = os.path.join(self.video_dir, 'images', sub, base)
+    depth_dir = os.path.join(self.video_dir, 'depth')
+    for name in (base, base.replace('color', 'depth', 1)):
+      path = os.path.join(depth_dir, name)
       if os.path.isfile(path):
         return path
-    return os.path.join(self.video_dir, 'images', 'depth_20', base)
+    return os.path.join(depth_dir, base.replace('color', 'depth', 1))
 
   def _mask_path(self, i):
     base = os.path.basename(self.color_files[i])
-    if self._use_rgb_layout:
-      return os.path.join(self.video_dir, 'masks', base)
-    return os.path.join(self.video_dir, 'images', 'mask', base)
+    return os.path.join(self.video_dir, 'masks', base)
 
   def get_mask(self, i):
     path = self._mask_path(i)
     if not os.path.isfile(path):
-      # fallback: mask might use depth naming (e.g. depth0001.png)
       depth_base = os.path.basename(self._depth_path(i))
-      if self._use_rgb_layout:
-        path = os.path.join(self.video_dir, 'masks', depth_base)
-      else:
-        path = os.path.join(self.video_dir, 'images', 'mask', depth_base)
+      path = os.path.join(self.video_dir, 'masks', depth_base)
     mask = cv2.imread(path, -1)
     if mask is None:
       raise FileNotFoundError(f"Mask not found: {path}")
@@ -269,17 +260,18 @@ class CalibrationMountReader:
     depth = cv2.imread(path, -1)
     if depth is None:
       raise FileNotFoundError(f"Depth not found: {path}")
-    depth = depth.astype(np.float64) / 1000.0  # mm -> meters
+    depth = depth.astype(np.float64) / 1000.0  # 16-bit mm -> meters
     depth = cv2.resize(depth, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
     depth[(depth < 0.001) | (depth >= self.zfar)] = 0
     return depth
 
   def get_xyz_map(self, i):
-    depth = self.get_depth(i)
-    return depth2xyzmap(depth, self.K)
+    return depth2xyzmap(self.get_depth(i), self.K)
 
   def get_gt_mesh_path(self):
     gt_dir = os.path.join(self.video_dir, 'groundtruth')
+    if not os.path.isdir(gt_dir):
+      return None
     for name in sorted(os.listdir(gt_dir)):
       sub = os.path.join(gt_dir, name)
       if not os.path.isdir(sub):
@@ -753,5 +745,3 @@ class TudlReader(BopBaseReader):
   def get_gt_mesh_file(self, ob_id):
     mesh_file = f'{self.base_dir}/../../../tudl_models/models/obj_{ob_id:06d}.ply'
     return mesh_file
-
-

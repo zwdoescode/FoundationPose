@@ -64,24 +64,22 @@ if __name__=='__main__':
   est = FoundationPose(model_pts=mesh.vertices, model_normals=mesh.vertex_normals, mesh=mesh, scorer=scorer, refiner=refiner, debug_dir=debug_dir, debug=debug, glctx=glctx)
   logging.info("estimator initialization done")
 
+  # Run detection (register) on every frame for better alignment; tracking is not used.
   for i in range(len(reader.color_files)):
     logging.info(f'i:{i}')
     color = reader.get_color(i)
     depth = reader.get_depth(i)
-    if i==0:
-      mask = reader.get_mask(0).astype(bool)
-      pose = est.register(K=reader.K, rgb=color, depth=depth, ob_mask=mask, iteration=args.est_refine_iter)
+    mask = reader.get_mask(i).astype(bool)
+    pose = est.register(K=reader.K, rgb=color, depth=depth, ob_mask=mask, iteration=args.est_refine_iter)
 
-      if debug>=3:
-        m = mesh.copy()
-        m.apply_transform(pose)
-        m.export(f'{debug_dir}/model_tf.obj')
-        xyz_map = depth2xyzmap(depth, reader.K)
-        valid = depth>=0.001
-        pcd = toOpen3dCloud(xyz_map[valid], color[valid])
-        o3d.io.write_point_cloud(f'{debug_dir}/scene_complete.ply', pcd)
-    else:
-      pose = est.track_one(rgb=color, depth=depth, K=reader.K, iteration=args.track_refine_iter)
+    if i == 0 and debug >= 3:
+      m = mesh.copy()
+      m.apply_transform(pose)
+      m.export(f'{debug_dir}/model_tf.obj')
+      xyz_map = depth2xyzmap(depth, reader.K)
+      valid = depth >= 0.001
+      pcd = toOpen3dCloud(xyz_map[valid], color[valid])
+      o3d.io.write_point_cloud(f'{debug_dir}/scene_complete.ply', pcd)
 
     os.makedirs(f'{debug_dir}/ob_in_cam', exist_ok=True)
     np.savetxt(f'{debug_dir}/ob_in_cam/{reader.id_strs[i]}.txt', pose.reshape(4,4))

@@ -66,7 +66,7 @@ RUN pip install "git+https://github.com/NVlabs/nvdiffrast.git" --no-build-isolat
 
 ENV OPENCV_IO_ENABLE_OPENEXR=1
 
-RUN pip install pyyaml ruamel.yaml trimesh opencv-python==4.9.0.80 imageio transformations warp-lang einops kornia pyrender omegaconf h5py
+RUN pip install pyyaml ruamel.yaml trimesh opencv-python==4.9.0.80 imageio transformations warp-lang einops kornia pyrender omegaconf h5py pandas
 # Official open3d has no PyPI wheel on some platforms (e.g. aarch64). Fallback to unofficial ARM wheels.
 RUN pip install open3d || pip install open3d-unofficial-arm
 #RUN pip install scikit-image meshcat webdataset omegaconf pypng roma seaborn opencv-contrib-python openpyxl wandb imgaug Ninja xlsxwriter timm albumentations xatlas rtree nodejs jupyterlab objaverse g4f ultralytics==8.0.120 pycocotools videoio numba h5py

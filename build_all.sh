@@ -12,6 +12,7 @@ cd $DIR/mycpp/ && mkdir -p build && cd build && cmake .. -DPYTHON_EXECUTABLE=$(w
 # 2. Kaolin: install without deps to avoid usd-core (no PyPI wheel on many platforms)
 cd /kaolin && rm -rf build *egg* && pip install --no-deps -e .
 
+# 3. Build BundleSDF CUDA ops for the local model-free NeRF workflow
 cd $DIR/bundlesdf/mycuda && rm -rf build *egg* && pip install -e .
 
-cd ${DIR}
+cd "${DIR}"
